@@ -204,18 +204,19 @@ Max: [* question *] What about performance: is it possible for this design to
    depends.</i>
 
    The basic recovery machine depends on the following components:
-   - Hare. This component holds the ordered log of all HA events in the system.
+   - Hare. This component is supposed to own an ordered log of all HA events
+     in the system. Note, this dependency is optional for a certain set
+     of use-cases where events are delivered in the right way even without
+     beign backed up by a log.
 --->>>
 Max: [* defect *] This is not true at the moment. Please specify if it's
      possible to implement this design without this being true or what is the
      plan to deal with this.
+IvanA: [fixed] I added a note that this thing is optional for some cases.
 <<<---
    - DTM0 service. The service provides access to DTM0 log and DTM0 RPC link.
    - DTM0 log. The log is used to fill in REDO messages.
-   - DTM0 RPC link. The lik is used as transport for REDO messages.
---->>>
-Max: [* typo *] s/lik/link/
-<<<---
+   - DTM0 RPC link. The link is used as transport for REDO messages.
    - Motr HA/conf. HA states of Motr conf objects provide the information
    about state transitions of local and remote Motr processes.
    - Motr conf. The conf module provides the list of remote DTM0 services.
@@ -227,27 +228,145 @@ Max: [* typo *] s/lik/link/
    logical specifications, and enumerates topics that need special
    attention.</i>
 
-   The recovery machine is a set of independent FOMs (one FOM per
-   potential DTM0 participant). Such a FOM is called a recovery FOM.
---->>>
-Max: [* defect *] It's not clear if it's an in-process set or a set of foms in
-     different processes. Please clarify.
-<<<---
-   A recovery FOM has sub-machines dedicated to a "role" in the recovery
---->>>
-Max: [* defect *] It's not clear what a "sub-machine" is. Please provide a
-     reference.
-<<<---
-   procedures: remote recovery, local recovery, and eviction.
---->>>
-Max: [* doc *] Please clarify if the fom could have several "roles" at the same
-     time and how the state transition between roles happen.
-<<<---
-   The role is changed linearly based on the incoming HA events for the
---->>>
-Max: [* defect *] Definition of "linearly" in this context is missing.
-<<<---
-   corresponding participant.
+   Each DTM0 service has a recovery machine. Each recovery machine contains
+   N recovery FOMs (one per counterpart + one local). Recovery FOMs start
+   listen to various events (HA events, DTM0 log events, RPC replies) and
+   act accordingly (sending out M0_CONF_HA_PROCESS_* events and REDO messages).
+
+   @verbatim
+
+   +-------------------------------------------+
+   | Recoverable process, process fid = 1      |
+   | +---------------------------------------+ |
+   | | DTM0 Service                          | |
+   | |                                       | |
+   | | +-----------------------------------+ | |
+   | | | Recovery machine                  | | |
+   | | |                                   | | |
+   | | | +--------+ +--------+ +--------+  | | |
+   | | | | R_FOM1 | | R_FOM2 | | R_FOM3 |  | | |
+   | | | | FID=1  | | FID=2  | | FID=3  |  | | |
+   | | | +--------+ +--------+ +--------+  | | |
+   | | |                                   | | |
+   | | +-----------------------------------+ | |
+   | +---------------------------------------+ |
+   +-------------------------------------------+
+
+       Recovery machines of one of the processes of a 3-process cluster.
+     The other two processes have the same set of FOMs. FID=N means that
+     the id of this recovery FOM is N. The first one (R_FOM1) is the local
+     recovery FOM of this DTM0 service. The other two (R_FOM2, R_FOM3) are
+     remote recovery FOMs that would send REDOs to the processes 2 and 3.
+
+   @endverbatim
+
+   Each recovery FOM may await on external events:
+
+   @verbatim
+
+   +-----------------------------------------------------+
+   |  Recovery FOM inputs                                |
+   |                                                     |
+   |                      Pollling                       |
+   |   ----------------------------------------------    |
+   |   |  HA queue |  | DTM0 log |  | RPC replies   |    |
+   |   |           |  | watcher  |  |               |    |
+   |   |    /|\    |  |          |  |     /|\       |    |
+   |   |     |     |  |   /|\    |  |      |        |    |
+   |   |     |     |  |    |     |  |      |        |    |
+   |   |  conf obj |  | DTM0 log |  | DTM0 RPC link |    |
+   +-----------------------------------------------------+
+
+   @endverbatim
+
+   For example, when a recovery FOM performs recovery of a remote
+   process, it may await on HA queue (to halt sending of REDOs), on
+   DTM0 log watcher (to learn if there are new entries in the log),
+   or on DTM0 RPC link (to learn if next REDO message can be sent).
+
+   Whenever a recovery FOM receives an event from the HA queue, it gets
+   "reincarnated" to serve its particular role in recovery procedures
+   (see "Recovery FOM reincarnation" definition).
+   Incarnation of a recovery FOM is just a sub-state-machine of the FOM.
+   For example, here is the full state machine of R_FOM2:
+
+   @verbatim
+
+   INIT -> AWAIT_HEQ (HA event queue)
+
+   AWAIT_HEQ -> DECIDE_WHAT_TO_DO
+   DECIDE_WHAT_TO_DO -> AWAIT_HEQ
+   DECIDE_WHAT_TO_DO -> RESET
+   DECIDE_WHAT_TO_DO -> FINAL
+
+   RESET -> SEND_REDO
+
+   SEND_REDO -> AWAIT_HEQ_OR_LOG
+   SEND_REDO -> AWAIT_HEQ_OR_RPC
+
+   AWAIT_HEQ_OR_LOG -> SEND_REDO
+   AWAIT_HEQ_OR_LOG -> HEQ
+
+   AWAIT_HEQ_OR_RPC -> SEND_REDO
+   AWAIT_HEQ_OR_RPC -> HEQ
+
+   INIT -------------->  AWAIT_HEQ
+                         |     /|\
+			\|/     |
+                        DECIDE_WHAT_TO_DO --------------> FINAL
+                         |    /|\
+			 |     |               (remote recovery
+                         |     |                 sub-states)
+   //====================|=====|===================================//
+   //  RESET <-----------+     +---< HEQ      (Transitions that    //
+   //    |                                     may happen as       //
+   //    |                                     a reaction to       //
+   //    |    +------------------------+       RECOVERING HA event)//
+   //   \|/  \|/                       |                           //
+   //  SEND_REDO ---------------> AWAIT_ON_HEQ_OR_RPC ---> HEQ     //
+   //      |  /|\                                                  //
+   //     \|/  |                                                   //
+   //     AWAIT_ON_HEQ_OR_LOG -----> HEQ                           //
+   //==============================================================//
+
+                        ...   ...
+			 |    |             (eviction sub-states)
+   //====================|====|====================================//
+   //   RESET <----------+    +----< HEQ     (Transitions that     //
+   //    |                                    may happen as a      //
+   //    |    +------------------+            a reaction to FAILED //
+   //   \|/  \|/                 |            HA event)            //
+   //   SEND_REDO -----> AWAIT_ON_HEQ_OR_RPC ----> HEQ             //
+   //==============================================================//
+   @endverbatim
+
+   The first frame highlighted with "===//" shows the sub-state machine of
+   a recovery FOM that are used to recover a participant that entered
+   RECOVERING HA state. If the same participant enters FAILED state
+   (permanent failure) then another set of sub-states would be involved
+   in recovery procedures (the second frame).
+
+   On the diagram above, the transition DECIDE_WHAT_TO_DO -> RESET
+   marks the point where recovery FOM enters a new incarnation,
+   the transtion HEQ -> DECIDE_WHAT_TO_DO marks the end of the live of this
+   incaration. The set of sub-states is called "role".
+   For example, if a recovery FOM is somewhere inside the first frame
+   (remote recovery) then we say that it has "remote recovery role" and it
+   performs "remote recovery". Correspondingly, the second frame describes
+   "eviction role" or just "eviction".
+
+   The notion of incarnation is used to emphasise that a recovery FOM must
+   always "clean up" its volatile state before processing next HA event.
+   For example, it may await on a pending RPC reply or it may have to reset
+   DTM0 log iterator.
+
+   The local recovery FOM (R_FOM1 in the example), is just a volatile
+   state that captures information about certain points in the log and sends
+   out ::M0_CONF_HA_PROCESS_RECOVERED when it believes that the local process
+   has been fully recovered (see the recovery stop condition below).
+   The local recovery FOM cannot change its role (it cannot recover itself
+   from transient or permanent failures).
+
 
    <hr>
    @section DTM0BR-lspec Logical Specification
@@ -405,7 +524,7 @@ Max: [* defect *] You're right, the details are missing.
 <<<---
 
 
-   @subsection DTM0BR-lspec-loc-fom Eviction FOM
+   @subsection DTM0BR-lspec-evc-fom Eviction FOM
    <i>Such sections briefly describes the purpose and design of each
    sub-component.</i>
 --->>>
@@ -472,21 +591,14 @@ Max: [* doc *] Also distributed state diagram.
    the critical sections and synchronization primitives used
    (such as semaphores, locks, mutexes and condition variables).</i>
 
-   Recovery machine revolves around the following kins of threads:
---->>>
-Max: [* typo *] s/kins/kinds/
-<<<---
+   Recovery machine revolves around the following kinds of threads:
 --->>>
 Max: [* defect *] Definition of "revolves" is missing.
 <<<---
    - Locality threads (Recovery FOMs, DTM0 log updates).
    - RPC machine thread (RPC replies).
 
-   Each recovery FOM is beign executed using Motr coroutines library.
---->>>
-Max: [* defect *] s/executed/implemented/. Motr foms are being executed by
-     locality threads.
-<<<---
+   Each recovery FOM is implemented using Motr coroutines library.
    Within the coroutine ::m0_be_op and/or ::m0_co_op is used to await
 --->>>
 Max: [* question *] RE: "the coroutine": which one?
