@@ -30,6 +30,7 @@
 #include "ut/ut.h"
 #include "cas/cas.h"
 #include "cas/cas_xc.h"
+#include "dtm0/recovery.h"
 
 #define M0_FID(c_, k_)  { .f_container = c_, .f_key = k_ }
 #define SERVER_ENDPOINT_ADDR    "0@lo:12345:34:1"
@@ -306,10 +307,84 @@ static void cas_xcode_test(void)
     m0_xcode_free_obj(&M0_XCODE_OBJ(m0_cas_op_xc, op_out));
 }
 
+struct ut_remach {
+	struct m0_rpc_server_ctx         srv_ctx;
+	struct m0_dtm0_recovery_machine  srv_mach;
+};
+
+static void ut_srv_remach_init(struct ut_remach *um)
+{
+	int                       rc;
+	struct m0_rpc_server_ctx *sctx = &um->srv_ctx;
+	struct m0_reqh           *srv_reqh;
+	struct m0_dtm0_service   *srv_svc;
+
+	*sctx = (struct m0_rpc_server_ctx) {
+		.rsx_xprts         = m0_net_all_xprt_get(),
+		.rsx_xprts_nr      = m0_net_xprt_nr(),
+		.rsx_argv          = dtm0_ut_argv,
+		.rsx_argc          = ARRAY_SIZE(dtm0_ut_argv),
+		.rsx_log_file_name = DTM0_UT_LOG,
+	};
+
+	m0_fi_enable("m0_dtm0_in_ut", "ut");
+
+	rc = m0_rpc_server_start(sctx);
+	M0_UT_ASSERT(rc == 0);
+
+	srv_reqh = &sctx->rsx_motr_ctx.cc_reqh_ctx.rc_reqh;
+	M0_UT_ASSERT(m0_reqh_service_lookup(srv_reqh, &srv_dtm0_fid) != NULL);
+	srv_svc = M0_AMB(srv_svc,
+			 m0_reqh_service_lookup(srv_reqh, &srv_dtm0_fid),
+			 dos_generic);
+
+	rc = m0_dtm0_recovery_machine_init(&um->srv_mach, srv_svc);
+	M0_UT_ASSERT(rc == 0);
+}
+
+static void ut_srv_remach_fini(struct ut_remach *um)
+{
+	struct m0_rpc_server_ctx *sctx = &um->srv_ctx;
+
+	m0_dtm0_recovery_machine_fini(&um->srv_mach);
+	m0_rpc_server_stop(sctx);
+	m0_fi_disable("m0_dtm0_in_ut", "ut");
+}
+
+static void ut_srv_remach_start(struct ut_remach *um)
+{
+	struct m0_dtm0_recovery_machine *m = &um->srv_mach;
+	m0_dtm0_recovery_machine_start(m);
+}
+
+static void ut_srv_remach_stop(struct ut_remach *um)
+{
+	struct m0_dtm0_recovery_machine *m = &um->srv_mach;
+	m0_dtm0_recovery_machine_stop(m);
+}
+
+static void remach_init_fini(void)
+{
+	struct ut_remach um;
+	ut_srv_remach_init(&um);
+	ut_srv_remach_fini(&um);
+}
+
+static void remach_start_stop(void)
+{
+	struct ut_remach um;
+	ut_srv_remach_init(&um);
+	ut_srv_remach_start(&um);
+	ut_srv_remach_stop(&um);
+	ut_srv_remach_fini(&um);
+}
+
 struct m0_ut_suite dtm0_ut = {
-        .ts_name = "dtm0-ut",
-        .ts_tests = {
-                { "xcode",   cas_xcode_test },
+	.ts_name = "dtm0-ut",
+	.ts_tests = {
+		{ "xcode",              cas_xcode_test   },
+		{ "remach-init-fini",   remach_init_fini },
+		{ "remach-start-stop",   remach_start_stop },
 		{ NULL, NULL },
 	}
 };

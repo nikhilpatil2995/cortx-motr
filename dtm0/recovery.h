@@ -25,6 +25,34 @@
 #ifndef __MOTR_DTM0_RECOVERY_H__
 #define __MOTR_DTM0_RECOVERY_H__
 
+#include "lib/tlist.h" /* m0_tl */
+
+/* TODO: figure good literals and it move to the satchel */
+#define M0_DTM0_RMACH_MAGIC 0x3AB0DBED
+#define M0_DTM0_RMACH_HEAD_MAGIC 0xB0EB0D11
+
+/* imports */
+struct m0_dtm0_service;
+
+/* exports */
+struct m0_dtm0_recovery_machine {
+	struct m0_dtm0_service *rm_svc;
+	struct m0_tl            rm_rfoms;
+};
+
+M0_INTERNAL int
+m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine *recovery,
+			      struct m0_dtm0_service  *svc);
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_start(struct m0_dtm0_recovery_machine *recovery);
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_stop(struct m0_dtm0_recovery_machine *recovery);
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *recovery);
+
 #endif /* __MOTR_DTM0_RECOVERY_H__ */
 
 /*

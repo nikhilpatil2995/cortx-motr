@@ -55,3 +55,32 @@ M0_INTERNAL int m0_dtm0_req_post(struct m0_dtm0_service    *svc,
 	(void) wait_for_ack;
 	return 0;
 }
+
+#include "dtm0/recovery.h"
+
+M0_INTERNAL int
+m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine *m,
+			      struct m0_dtm0_service          *svc)
+{
+	(void) m;
+	(void) svc;
+	return 0;
+}
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_start(struct m0_dtm0_recovery_machine *m)
+{
+	(void) m;
+}
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_stop(struct m0_dtm0_recovery_machine *m)
+{
+	(void) m;
+}
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *m)
+{
+	(void) m;
+}
