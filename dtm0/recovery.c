@@ -773,6 +773,12 @@ struct recovery_fom {
 	/* Target DTM0 service FID (id of this FOM within the machine). */
 	struct m0_fid        rf_tgt_svc;
 
+	/** Is target DTM0 service the service ::rf_m belongs to? */
+	bool                 rf_is_local;
+
+	/** Is target DTM0 volatile? */
+	bool                 rf_is_volatile;
+
 	/** Subscription to conf obj HA state. */
 	struct m0_clink      rf_ha_clink;
 
@@ -803,6 +809,9 @@ static bool recovery_fom_ha_clink_cb(struct m0_clink *clink);
 static void recovery_fom_self_fini(struct m0_fom *fom);
 static int  recovery_fom_tick(struct m0_fom *fom);
 static void mod_init(void);
+
+static void recovery_machine_lock(struct m0_dtm0_recovery_machine *m);
+static void recovery_machine_unlock(struct m0_dtm0_recovery_machine *m);
 
 M0_INTERNAL int
 m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine *m,
@@ -853,6 +862,16 @@ m0_dtm0_recovery_machine_reqh(struct m0_dtm0_recovery_machine *m)
 	return m->rm_svc->dos_generic.rs_reqh;
 }
 
+static void recovery_machine_lock(struct m0_dtm0_recovery_machine *m)
+{
+	/* TODO */
+}
+
+static void recovery_machine_unlock(struct m0_dtm0_recovery_machine *m)
+{
+	/* TODO */
+}
+
 enum recovery_fom_state {
 	RFS_INIT = M0_FOM_PHASE_INIT,
 	RFS_DONE = M0_FOM_PHASE_FINISH,
@@ -864,7 +883,7 @@ enum recovery_fom_state {
 static struct m0_sm_state_descr recovery_fom_states[] = {
 	[RFS_INIT] = {
 		.sd_name      = "RFS_INIT",
-		.sd_allowed   = M0_BITS(RFS_WAITING, RFS_FAILED),
+		.sd_allowed   = M0_BITS(RFS_WAITING, RFS_DONE, RFS_FAILED),
 		.sd_flags     = M0_SDF_INITIAL,
 	},
 	/* terminal states */
@@ -925,13 +944,10 @@ static void mod_init(void)
 	}
 }
 
-static bool recovery_fom_ha_clink_cb(struct m0_clink *clink)
+static void heq_post(struct recovery_fom *rf, enum m0_ha_obj_state state)
 {
-	struct recovery_fom *rf        = M0_AMB(rf, clink, rf_ha_clink);
-	struct m0_conf_obj  *proc_conf = container_of(clink->cl_chan,
-						       struct m0_conf_obj,
-						       co_ha_chan);
-	uint64_t event = proc_conf->co_ha_state;
+	uint64_t event = state;
+	m0_be_queue_lock(&rf->rf_heq);
 	/*
 	 * Assumption: the queue never gets full.
 	 * XXX: We could panic in this case. Right now, the HA FOM should get
@@ -939,8 +955,17 @@ static bool recovery_fom_ha_clink_cb(struct m0_clink *clink)
 	 *      here.
 	 */
 	M0_BE_OP_SYNC(op, M0_BE_QUEUE_PUT(&rf->rf_heq, &op, &event));
-	return false;
+	m0_be_queue_unlock(&rf->rf_heq);
+}
 
+static bool recovery_fom_ha_clink_cb(struct m0_clink *clink)
+{
+	struct recovery_fom *rf        = M0_AMB(rf, clink, rf_ha_clink);
+	struct m0_conf_obj  *proc_conf = container_of(clink->cl_chan,
+						       struct m0_conf_obj,
+						       co_ha_chan);
+	heq_post(rf, proc_conf->co_ha_state);
+	return false;
 }
 
 static int recovery_fom_init(struct recovery_fom             *rf,
@@ -952,6 +977,9 @@ static int recovery_fom_init(struct recovery_fom             *rf,
 
 	rf->rf_m = m;
 	rf->rf_tgt_svc = *target;
+	rf->rf_is_local = m0_fid_eq(&m->rm_svc->dos_generic.rs_service_fid,
+				    target);
+	rf->rf_is_volatile = m->rm_svc->dos_origin != DTM0_ON_PERSISTENT;
 
 	rfom_tlink_init(rf);
 	m0_co_context_init(&rf->rf_coro);
@@ -977,13 +1005,15 @@ static int recovery_fom_init(struct recovery_fom             *rf,
 
 static void recovery_fom_remove_lock(struct recovery_fom *rf)
 {
-	/* TODO: Do it under a lock, of course */
+	recovery_machine_lock(rf->rf_m);
 	rfom_tlist_remove(rf);
+	recovery_machine_unlock(rf->rf_m);
 }
 
 
 static void recovery_fom_fini(struct recovery_fom *rf)
 {
+	m0_semaphore_fini(&rf->rf_eoq_reached);
 	m0_be_queue_fini(&rf->rf_heq);
 	m0_clink_del_lock(&rf->rf_ha_clink);
 	m0_clink_fini(&rf->rf_ha_clink);
@@ -1007,10 +1037,14 @@ static int recovery_fom_add(struct m0_dtm0_recovery_machine *m,
 	struct recovery_fom *rf;
 	int                  rc;
 
+	recovery_machine_lock(m);
+
 	rc = M0_ALLOC_PTR(rf) == NULL ? M0_ERR(-ENOMEM) :
 		recovery_fom_init(rf, m, proc_conf, target);
 	if (rc == 0)
 		rfom_tlist_add_tail(&m->rm_rfoms, rf);
+
+	recovery_machine_unlock(m);
 	return M0_RC(rc);
 }
 
@@ -1041,6 +1075,12 @@ static int populate_foms(struct m0_dtm0_recovery_machine *m)
 	int                     rc;
 
 	M0_ENTRY("recovery machine=%p", m);
+
+	/** UT workaround */
+	if (!m0_confc_is_inited(confc)) {
+		M0_LOG(M0_WARN, "confc is not initiated!");
+		return M0_RC(0);
+	}
 
 	rc = m0_confc_root_open(confc, &root) ?:
 		m0_conf_diter_init(&it, confc,
@@ -1073,19 +1113,6 @@ out:
 	return M0_RC(rc);
 }
 
-#if 0
-static int  recovery_fom_tick(struct m0_fom *fom)
-{
-	int                  outcome = M0_FSO_WAIT;
-	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
-
-	m0_fom_phase_move(fom, -EINVAL, RFS_FAILED);
-	m0_fom_phase_set(fom, RFS_DONE);
-
-	return outcome;
-}
-#endif
-
 static struct m0_co_context *CO(struct m0_fom *fom)
 {
 	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
@@ -1093,7 +1120,7 @@ static struct m0_co_context *CO(struct m0_fom *fom)
 }
 #define F M0_CO_FRAME_DATA
 
-static void recovery_fom_coro(struct m0_fom *fom)
+static void remote_recovery_fom_coro(struct m0_fom *fom)
 {
 	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
 	enum m0_ha_obj_state state;
@@ -1125,6 +1152,44 @@ static void recovery_fom_coro(struct m0_fom *fom)
 	M0_LOG(M0_DEBUG, "State: %d", (int) state);
 }
 
+static void local_recovery_fom_coro(struct m0_fom *fom)
+{
+	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
+
+	M0_CO_REENTER(CO(fom),
+		      struct m0_be_op op;
+		      bool            got;
+		      uint64_t        state;);
+
+	/* TODO: wait for REDOs, post RECOVERED event and fade away. */
+
+	F(got) = false;
+	F(state) = 0;
+
+	M0_SET0(&F(op));
+	m0_be_op_init(&F(op));
+	m0_be_queue_lock(&rf->rf_heq);
+	M0_BE_QUEUE_GET(&rf->rf_heq, &F(op), &F(state), &F(got));
+	m0_be_queue_unlock(&rf->rf_heq);
+	M0_CO_YIELD_RC(CO(fom),
+		       m0_be_op_tick_ret(&F(op), fom, RFS_WAITING));
+	m0_be_op_fini(&F(op));
+
+	if (!F(got)) {
+		m0_semaphore_up(&rf->rf_eoq_reached);
+		m0_fom_phase_set(fom, RFS_DONE);
+		return;
+	} else
+		M0_IMPOSSIBLE("Local events are not handled yet.");
+}
+
+static void recovery_fom_coro(struct m0_fom *fom)
+{
+	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
+	(rf->rf_is_local ? local_recovery_fom_coro :
+	 remote_recovery_fom_coro)(fom);
+}
+
 static int recovery_fom_tick(struct m0_fom *fom)
 {
 	int rc;
@@ -1136,6 +1201,33 @@ static int recovery_fom_tick(struct m0_fom *fom)
 }
 
 #undef F
+
+M0_INTERNAL void
+m0_ut_remach_heq_post(struct m0_dtm0_recovery_machine *m,
+		      const struct m0_fid             *tgt_svc,
+		      enum m0_ha_obj_state             state)
+{
+	struct recovery_fom *rf;
+	recovery_machine_lock(m);
+	rf = m0_tl_find(rfom, rf, &m->rm_rfoms,
+			m0_fid_eq(tgt_svc, &rf->rf_tgt_svc));
+	M0_ASSERT_INFO(rf != NULL,
+		       "Trying to post HA event to a wrong service?");
+	recovery_machine_unlock(m);
+	heq_post(rf, state);
+}
+
+M0_INTERNAL void
+m0_ut_remach_populate(struct m0_dtm0_recovery_machine *m,
+		      struct m0_conf_process          *procs,
+		      const struct m0_fid             *svcs,
+		      uint64_t                         objs_nr)
+{
+	uint64_t i;
+
+	for (i = 0; i < objs_nr; ++i)
+		M0_ASSERT(recovery_fom_add(m, procs + i, svcs + i) == 0);
+}
 
 
 /*

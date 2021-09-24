@@ -26,6 +26,7 @@
 #define __MOTR_DTM0_RECOVERY_H__
 
 #include "lib/tlist.h" /* m0_tl */
+#include "ha/note.h"   /* m0_ha_obj_state */
 
 /* TODO: figure good literals and it move to the satchel */
 #define M0_DTM0_RMACH_MAGIC 0x3AB0DBED
@@ -33,6 +34,7 @@
 
 /* imports */
 struct m0_dtm0_service;
+struct m0_conf_process;
 
 /* exports */
 struct m0_dtm0_recovery_machine {
@@ -52,6 +54,17 @@ m0_dtm0_recovery_machine_stop(struct m0_dtm0_recovery_machine *recovery);
 
 M0_INTERNAL void
 m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *recovery);
+
+/* UT-related API */
+M0_INTERNAL void
+m0_ut_remach_heq_post(struct m0_dtm0_recovery_machine *recovery,
+		      const struct m0_fid             *tgt_svc,
+		      enum m0_ha_obj_state             state);
+M0_INTERNAL void
+m0_ut_remach_populate(struct m0_dtm0_recovery_machine *m,
+		      struct m0_conf_process          *procs,
+		      const struct m0_fid             *svcs,
+		      uint64_t                         objs_nr);
 
 #endif /* __MOTR_DTM0_RECOVERY_H__ */
 

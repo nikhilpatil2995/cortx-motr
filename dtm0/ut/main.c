@@ -307,9 +307,24 @@ static void cas_xcode_test(void)
     m0_xcode_free_obj(&M0_XCODE_OBJ(m0_cas_op_xc, op_out));
 }
 
+enum ut_sides {
+	UT_SIDE_SRV,
+	UT_SIDE_CLI,
+	UT_SIDE_NR
+};
+
 struct ut_remach {
 	struct m0_rpc_server_ctx         srv_ctx;
+	struct cl_ctx                    cli_ctx;
+
 	struct m0_dtm0_recovery_machine  srv_mach;
+	struct m0_dtm0_recovery_machine  cli_mach;
+
+	struct m0_dtm0_service          *srv_svc;
+	struct m0_dtm0_service          *cli_svc;
+
+	struct m0_conf_process           cli_procs[UT_SIDE_NR];
+	struct m0_mutex                  cli_proc_guards[UT_SIDE_NR];
 };
 
 static void ut_srv_remach_init(struct ut_remach *um)
@@ -317,7 +332,7 @@ static void ut_srv_remach_init(struct ut_remach *um)
 	int                       rc;
 	struct m0_rpc_server_ctx *sctx = &um->srv_ctx;
 	struct m0_reqh           *srv_reqh;
-	struct m0_dtm0_service   *srv_svc;
+	struct m0_reqh_service   *srv_svc;
 
 	*sctx = (struct m0_rpc_server_ctx) {
 		.rsx_xprts         = m0_net_all_xprt_get(),
@@ -333,13 +348,62 @@ static void ut_srv_remach_init(struct ut_remach *um)
 	M0_UT_ASSERT(rc == 0);
 
 	srv_reqh = &sctx->rsx_motr_ctx.cc_reqh_ctx.rc_reqh;
-	M0_UT_ASSERT(m0_reqh_service_lookup(srv_reqh, &srv_dtm0_fid) != NULL);
-	srv_svc = M0_AMB(srv_svc,
-			 m0_reqh_service_lookup(srv_reqh, &srv_dtm0_fid),
-			 dos_generic);
+	srv_svc = m0_reqh_service_lookup(srv_reqh, &srv_dtm0_fid),
+	M0_UT_ASSERT(srv_svc != NULL);
+	um->srv_svc = M0_AMB(um->srv_svc, srv_svc, dos_generic);
 
-	rc = m0_dtm0_recovery_machine_init(&um->srv_mach, srv_svc);
+	rc = m0_dtm0_recovery_machine_init(&um->srv_mach, um->srv_svc);
 	M0_UT_ASSERT(rc == 0);
+}
+
+static void ut_cli_remach_conf_obj_init(struct ut_remach *um)
+{
+	int i;
+
+	for (i = 0; i < UT_SIDE_NR; ++i) {
+		m0_mutex_init(&um->cli_proc_guards[i]);
+		m0_chan_init(&um->cli_procs[i].pc_obj.co_ha_chan,
+			     &um->cli_proc_guards[i]);
+	}
+}
+
+static void ut_cli_remach_conf_obj_fini(struct ut_remach *um)
+{
+	int i;
+
+	for (i = 0; i < UT_SIDE_NR; ++i) {
+		m0_chan_fini_lock(&um->cli_procs[i].pc_obj.co_ha_chan);
+		m0_mutex_fini(&um->cli_proc_guards[i]);
+	}
+}
+
+
+static void ut_cli_remach_init(struct ut_remach *um)
+{
+	struct cl_ctx          *cctx = &um->cli_ctx;
+	struct m0_reqh_service *cli_svc;
+	int                     rc;
+	struct m0_fid           svcs[UT_SIDE_NR] = {
+		[UT_SIDE_SRV] = srv_dtm0_fid,
+		[UT_SIDE_CLI] = cli_srv_fid,
+	};
+
+	ut_cli_remach_conf_obj_init(um);
+
+	dtm0_ut_client_init(cctx, cl_ep_addr, srv_ep_addr,
+			    m0_net_xprt_default_get());
+
+	rc = m0_dtm_client_service_start(&cctx->cl_ctx.rcx_reqh,
+					 &cli_srv_fid, &cli_svc);
+
+	M0_UT_ASSERT(rc == 0);
+	M0_UT_ASSERT(cli_svc != NULL);
+
+	um->cli_svc = M0_AMB(um->cli_svc, cli_svc, dos_generic);
+
+	rc = m0_dtm0_recovery_machine_init(&um->cli_mach, um->cli_svc);
+	M0_UT_ASSERT(rc == 0);
+	m0_ut_remach_populate(&um->cli_mach, um->cli_procs, svcs, UT_SIDE_NR);
 }
 
 static void ut_srv_remach_fini(struct ut_remach *um)
@@ -351,40 +415,67 @@ static void ut_srv_remach_fini(struct ut_remach *um)
 	m0_fi_disable("m0_dtm0_in_ut", "ut");
 }
 
-static void ut_srv_remach_start(struct ut_remach *um)
+static void ut_cli_remach_fini(struct ut_remach *um)
 {
-	struct m0_dtm0_recovery_machine *m = &um->srv_mach;
-	m0_dtm0_recovery_machine_start(m);
+	struct cl_ctx          *cctx = &um->cli_ctx;
+	struct m0_reqh_service *cli_svc = &um->cli_svc->dos_generic;
+
+	m0_dtm0_recovery_machine_fini(&um->cli_mach);
+	m0_dtm_client_service_stop(cli_svc);
+	dtm0_ut_client_fini(cctx);
+	ut_cli_remach_conf_obj_fini(um);
 }
 
-static void ut_srv_remach_stop(struct ut_remach *um)
+static void ut_remach_start(struct ut_remach *um)
 {
-	struct m0_dtm0_recovery_machine *m = &um->srv_mach;
-	m0_dtm0_recovery_machine_stop(m);
+	struct m0_dtm0_recovery_machine *srv_m = &um->srv_mach;
+	struct m0_dtm0_recovery_machine *cli_m = &um->cli_mach;
+	m0_dtm0_recovery_machine_start(srv_m);
+	m0_dtm0_recovery_machine_start(cli_m);
+}
+
+static void ut_remach_stop(struct ut_remach *um)
+{
+	struct m0_dtm0_recovery_machine *srv_m = &um->srv_mach;
+	struct m0_dtm0_recovery_machine *cli_m = &um->cli_mach;
+	m0_dtm0_recovery_machine_stop(cli_m);
+	m0_dtm0_recovery_machine_stop(srv_m);
+}
+
+static void ut_remach_init(struct ut_remach *um)
+{
+	ut_srv_remach_init(um);
+	ut_cli_remach_init(um);
+}
+
+static void ut_remach_fini(struct ut_remach *um)
+{
+	ut_cli_remach_fini(um);
+	ut_srv_remach_fini(um);
 }
 
 static void remach_init_fini(void)
 {
-	struct ut_remach um;
-	ut_srv_remach_init(&um);
-	ut_srv_remach_fini(&um);
+	struct ut_remach um = {};
+	ut_remach_init(&um);
+	ut_remach_fini(&um);
 }
 
 static void remach_start_stop(void)
 {
-	struct ut_remach um;
-	ut_srv_remach_init(&um);
-	ut_srv_remach_start(&um);
-	ut_srv_remach_stop(&um);
-	ut_srv_remach_fini(&um);
+	struct ut_remach um = {};
+	ut_remach_init(&um);
+	ut_remach_start(&um);
+	ut_remach_stop(&um);
+	ut_remach_fini(&um);
 }
 
 struct m0_ut_suite dtm0_ut = {
 	.ts_name = "dtm0-ut",
 	.ts_tests = {
-		{ "xcode",              cas_xcode_test   },
-		{ "remach-init-fini",   remach_init_fini },
-		{ "remach-start-stop",   remach_start_stop },
+		{ "xcode",             cas_xcode_test    },
+		{ "remach-init-fini",  remach_init_fini  },
+		{ "remach-start-stop", remach_start_stop },
 		{ NULL, NULL },
 	}
 };
