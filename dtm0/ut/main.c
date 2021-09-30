@@ -327,6 +327,62 @@ struct ut_remach {
 	struct m0_mutex                  cli_proc_guards[UT_SIDE_NR];
 };
 
+struct ha_thought {
+	enum ut_sides        who;
+	enum m0_ha_obj_state what;
+};
+#define HA_THOUGHT(_who, _what) { .who = _who, .what = _what }
+
+static void um_redo_post(struct m0_dtm0_recovery_machine *m,
+			 const struct m0_fid *tgt_proc,
+			 const struct m0_fid *tgt_svc,
+			 struct m0_dtm0_redo *redo,
+			 struct m0_be_op *op)
+{
+	bool is_eol = !!(redo->r_msg.dtr_flags & M0_BITS(M0_DMF_EOL));
+	if (is_eol)
+		m0_ut_remach_eol_reached(m, tgt_svc);
+}
+
+static int um_log_next_get(struct m0_dtm0_recovery_machine *m,
+		    const struct m0_fid *tgt_svc,
+		    struct m0_dtm0_redo *redo,
+		    struct m0_be_op *op)
+{
+	redo->r_msg.dtr_flags |= M0_BITS(M0_DMF_EOL);
+	return -ENOENT;
+}
+
+static void um_recovered(struct m0_dtm0_recovery_machine *m,
+		  const struct m0_fid *tgt_proc,
+		  const struct m0_fid *tgt_svc)
+{
+
+}
+
+const struct m0_dtm0_recovery_machine_ops um_ops = {
+	.redo_post    = um_redo_post,
+	.log_next_get = um_log_next_get,
+	.recovered    = um_recovered,
+};
+
+static void ut_remach_ha_thinks(struct ut_remach        *um,
+				const struct ha_thought *t)
+{
+	const struct m0_fid           svcs[UT_SIDE_NR] = {
+		[UT_SIDE_SRV] = srv_dtm0_fid,
+		[UT_SIDE_CLI] = cli_srv_fid,
+	};
+	struct m0_dtm0_recovery_machine *ms[UT_SIDE_NR] = {
+		[UT_SIDE_SRV] = &um->srv_mach,
+		[UT_SIDE_CLI] = &um->cli_mach,
+	};
+	int                              i;
+
+	for (i = 0; i < ARRAY_SIZE(svcs); ++i)
+		m0_ut_remach_heq_post(ms[i], &svcs[t->who], t->what);
+}
+
 static void ut_srv_remach_init(struct ut_remach *um)
 {
 	int                       rc;
@@ -352,7 +408,7 @@ static void ut_srv_remach_init(struct ut_remach *um)
 	M0_UT_ASSERT(srv_svc != NULL);
 	um->srv_svc = M0_AMB(um->srv_svc, srv_svc, dos_generic);
 
-	rc = m0_dtm0_recovery_machine_init(&um->srv_mach, um->srv_svc);
+	rc = m0_dtm0_recovery_machine_init(&um->srv_mach, &um_ops, um->srv_svc);
 	M0_UT_ASSERT(rc == 0);
 }
 
@@ -401,7 +457,7 @@ static void ut_cli_remach_init(struct ut_remach *um)
 
 	um->cli_svc = M0_AMB(um->cli_svc, cli_svc, dos_generic);
 
-	rc = m0_dtm0_recovery_machine_init(&um->cli_mach, um->cli_svc);
+	rc = m0_dtm0_recovery_machine_init(&um->cli_mach, &um_ops, um->cli_svc);
 	M0_UT_ASSERT(rc == 0);
 	m0_ut_remach_populate(&um->cli_mach, um->cli_procs, svcs, UT_SIDE_NR);
 }
@@ -470,12 +526,38 @@ static void remach_start_stop(void)
 	ut_remach_fini(&um);
 }
 
+static void remach_ha_thinks(void)
+{
+	const struct ha_thought ha_thoughts[] = {
+		HA_THOUGHT(UT_SIDE_CLI, M0_NC_TRANSIENT),
+		HA_THOUGHT(UT_SIDE_SRV, M0_NC_TRANSIENT),
+
+		HA_THOUGHT(UT_SIDE_CLI, M0_NC_DTM_RECOVERING),
+		HA_THOUGHT(UT_SIDE_CLI, M0_NC_ONLINE),
+
+		HA_THOUGHT(UT_SIDE_SRV, M0_NC_DTM_RECOVERING),
+		HA_THOUGHT(UT_SIDE_SRV, M0_NC_ONLINE),
+	};
+	struct ut_remach        um = {};
+	int                     i;
+
+	ut_remach_init(&um);
+	ut_remach_start(&um);
+
+	for (i = 0; i < ARRAY_SIZE(ha_thoughts); ++i)
+		  ut_remach_ha_thinks(&um, ha_thoughts + i);
+
+	ut_remach_stop(&um);
+	ut_remach_fini(&um);
+}
+
 struct m0_ut_suite dtm0_ut = {
 	.ts_name = "dtm0-ut",
 	.ts_tests = {
 		{ "xcode",             cas_xcode_test    },
 		{ "remach-init-fini",  remach_init_fini  },
 		{ "remach-start-stop", remach_start_stop },
+		{ "remach-ha-thinks",  remach_ha_thinks  },
 		{ NULL, NULL },
 	}
 };

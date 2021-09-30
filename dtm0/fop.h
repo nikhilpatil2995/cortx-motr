@@ -45,13 +45,19 @@ enum m0_dtm0s_msg {
 	DTM_EXECUTE,
 	DTM_EXECUTED,
 	DTM_PERSISTENT,
-	DTM_REDO
+	DTM_REDO,
 } M0_XCA_ENUM;
+
+enum m0_dtm0_msg_flags {
+	M0_DMF_EOL,
+};
 
 /** A DTM0 message sent as an RPC request to remote DTM0 services. */
 struct dtm0_req_fop {
 	uint32_t               dtr_msg M0_XCA_FENUM(m0_dtm0s_msg);
 	struct m0_dtm0_tx_desc dtr_txr;
+	uint64_t               dtr_flags;
+	struct m0_buf          dtr_payload;
 } M0_XCA_RECORD M0_XCA_DOMAIN(rpc);
 
 struct dtm0_rep_fop {

@@ -27,6 +27,7 @@
 
 #include "lib/tlist.h" /* m0_tl */
 #include "ha/note.h"   /* m0_ha_obj_state */
+#include "dtm0/fop.h"  /* dtm0_req_fop */
 
 /* TODO: figure good literals and it move to the satchel */
 #define M0_DTM0_RMACH_MAGIC 0x3AB0DBED
@@ -37,27 +38,52 @@ struct m0_dtm0_service;
 struct m0_conf_process;
 
 /* exports */
+struct m0_dtm0_recovery_machine_ops;
+
 struct m0_dtm0_recovery_machine {
-	struct m0_dtm0_service *rm_svc;
-	struct m0_tl            rm_rfoms;
+	struct m0_dtm0_service                    *rm_svc;
+	struct m0_tl                               rm_rfoms;
+	const struct m0_dtm0_recovery_machine_ops *rm_ops;
+};
+
+struct m0_dtm0_redo {
+	struct dtm0_req_fop r_msg;
+};
+
+struct m0_dtm0_recovery_machine_ops {
+	void (*redo_post)(struct m0_dtm0_recovery_machine *m,
+			  const struct m0_fid *tgt_proc,
+			  const struct m0_fid *tgt_svc,
+			  struct m0_dtm0_redo *redo,
+			  struct m0_be_op *op);
+
+	int (*log_next_get)(struct m0_dtm0_recovery_machine *m,
+			    const struct m0_fid *tgt_svc,
+			    struct m0_dtm0_redo *redo,
+			    struct m0_be_op *op);
+
+	void (*recovered)(struct m0_dtm0_recovery_machine *m,
+			  const struct m0_fid *tgt_proc,
+			  const struct m0_fid *tgt_svc);
 };
 
 M0_INTERNAL int
-m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine *recovery,
-			      struct m0_dtm0_service  *svc);
+m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine           *m,
+			      const struct m0_dtm0_recovery_machine_ops *ops,
+			      struct m0_dtm0_service                    *svc);
 
 M0_INTERNAL void
-m0_dtm0_recovery_machine_start(struct m0_dtm0_recovery_machine *recovery);
+m0_dtm0_recovery_machine_start(struct m0_dtm0_recovery_machine *m);
 
 M0_INTERNAL void
-m0_dtm0_recovery_machine_stop(struct m0_dtm0_recovery_machine *recovery);
+m0_dtm0_recovery_machine_stop(struct m0_dtm0_recovery_machine *m);
 
 M0_INTERNAL void
-m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *recovery);
+m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *m);
 
 /* UT-related API */
 M0_INTERNAL void
-m0_ut_remach_heq_post(struct m0_dtm0_recovery_machine *recovery,
+m0_ut_remach_heq_post(struct m0_dtm0_recovery_machine *m,
 		      const struct m0_fid             *tgt_svc,
 		      enum m0_ha_obj_state             state);
 M0_INTERNAL void
@@ -66,6 +92,9 @@ m0_ut_remach_populate(struct m0_dtm0_recovery_machine *m,
 		      const struct m0_fid             *svcs,
 		      uint64_t                         objs_nr);
 
+M0_INTERNAL void
+m0_ut_remach_eol_reached(struct m0_dtm0_recovery_machine *m,
+			 const struct m0_fid             *tgt_svc);
 #endif /* __MOTR_DTM0_RECOVERY_H__ */
 
 /*

@@ -59,11 +59,13 @@ M0_INTERNAL int m0_dtm0_req_post(struct m0_dtm0_service    *svc,
 #include "dtm0/recovery.h"
 
 M0_INTERNAL int
-m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine *m,
-			      struct m0_dtm0_service          *svc)
+m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine           *m,
+			      const struct m0_dtm0_recovery_machine_ops *ops,
+			      struct m0_dtm0_service                    *svc)
 {
 	(void) m;
 	(void) svc;
+	(void) ops;
 	return 0;
 }
 

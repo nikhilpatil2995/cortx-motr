@@ -773,6 +773,8 @@ struct recovery_fom {
 	/* Target DTM0 service FID (id of this FOM within the machine). */
 	struct m0_fid        rf_tgt_svc;
 
+	struct m0_fid        rf_tgt_proc;
+
 	/** Is target DTM0 service the service ::rf_m belongs to? */
 	bool                 rf_is_local;
 
@@ -796,6 +798,8 @@ struct recovery_fom {
 	struct m0_semaphore  rf_eoq_reached;
 };
 
+#define HA_EVENT_EOQ UINT64_MAX
+
 M0_TL_DESCR_DEFINE(rfom, "recovery_fom",
 		   static, struct recovery_fom, rf_linkage,
 		   rf_magic, M0_DTM0_RMACH_MAGIC, M0_DTM0_RMACH_HEAD_MAGIC);
@@ -813,12 +817,23 @@ static void mod_init(void);
 static void recovery_machine_lock(struct m0_dtm0_recovery_machine *m);
 static void recovery_machine_unlock(struct m0_dtm0_recovery_machine *m);
 
-M0_INTERNAL int
-m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine *m,
-			      struct m0_dtm0_service  *svc)
+static bool ha_event_invariant(uint64_t event)
 {
+	return ergo(event != HA_EVENT_EOQ, event < M0_NC_NR);
+
+}
+
+M0_INTERNAL int
+m0_dtm0_recovery_machine_init(struct m0_dtm0_recovery_machine           *m,
+			      const struct m0_dtm0_recovery_machine_ops *ops,
+			      struct m0_dtm0_service                    *svc)
+{
+	M0_PRE(m != NULL);
+	M0_PRE(ops != NULL);
+
 	mod_init();
 	m->rm_svc = svc;
+	m->rm_ops = ops;
 	rfom_tlist_init(&m->rm_rfoms);
 	return M0_RC(populate_foms(m));
 }
@@ -860,6 +875,33 @@ static struct m0_reqh *
 m0_dtm0_recovery_machine_reqh(struct m0_dtm0_recovery_machine *m)
 {
 	return m->rm_svc->dos_generic.rs_reqh;
+}
+
+static int recovery_machine_log_next_get(struct m0_dtm0_recovery_machine *m,
+					 const struct m0_fid *tgt_svc,
+					 struct m0_dtm0_redo *redo,
+					 struct m0_be_op *op)
+{
+	M0_PRE(m->rm_ops->log_next_get != NULL);
+	return m->rm_ops->log_next_get(m, tgt_svc, redo, op);
+}
+
+static void recovery_machine_redo_post(struct m0_dtm0_recovery_machine *m,
+				       const struct m0_fid *tgt_proc,
+				       const struct m0_fid *tgt_svc,
+				       struct m0_dtm0_redo *redo,
+				       struct m0_be_op *op)
+{
+	M0_PRE(m->rm_ops->redo_post != NULL);
+	m->rm_ops->redo_post(m, tgt_proc, tgt_svc, redo, op);
+}
+
+static void recovery_machine_recovered(struct m0_dtm0_recovery_machine *m,
+				       const struct m0_fid *tgt_proc,
+				       const struct m0_fid *tgt_svc)
+{
+	M0_PRE(m->rm_ops->recovered != NULL);
+	m->rm_ops->recovered(m, tgt_proc, tgt_svc);
 }
 
 static void recovery_machine_lock(struct m0_dtm0_recovery_machine *m)
@@ -906,7 +948,7 @@ static struct m0_sm_state_descr recovery_fom_states[] = {
 		.sd_allowed = allowed \
 	}
 	_ST(RFS_WAITING,           M0_BITS(RFS_DONE,
-					   RFS_FAILED)),
+					   RFS_FAILED, RFS_WAITING)),
 #undef _ST
 };
 
@@ -1010,7 +1052,6 @@ static void recovery_fom_remove_lock(struct recovery_fom *rf)
 	recovery_machine_unlock(rf->rf_m);
 }
 
-
 static void recovery_fom_fini(struct recovery_fom *rf)
 {
 	m0_semaphore_fini(&rf->rf_eoq_reached);
@@ -1047,6 +1088,20 @@ static int recovery_fom_add(struct m0_dtm0_recovery_machine *m,
 	recovery_machine_unlock(m);
 	return M0_RC(rc);
 }
+
+static struct recovery_fom *
+recovery_fom_by_svc_find_lock(struct m0_dtm0_recovery_machine *m,
+			      const struct m0_fid             *tgt_svc)
+{
+	struct recovery_fom *rf;
+	recovery_machine_lock(m);
+	rf = m0_tl_find(rfom, rf, &m->rm_rfoms,
+			m0_fid_eq(tgt_svc, &rf->rf_tgt_svc));
+	recovery_machine_unlock(m);
+	return rf;
+}
+
+
 
 static void unpopulate_foms(struct m0_dtm0_recovery_machine *m)
 {
@@ -1120,10 +1175,9 @@ static struct m0_co_context *CO(struct m0_fom *fom)
 }
 #define F M0_CO_FRAME_DATA
 
-static void remote_recovery_fom_coro(struct m0_fom *fom)
+static void heq_await(struct m0_fom *fom, enum m0_ha_obj_state *out, bool *eoq)
 {
 	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
-	enum m0_ha_obj_state state;
 
 	M0_CO_REENTER(CO(fom),
 		      struct m0_be_op op;
@@ -1141,15 +1195,82 @@ static void remote_recovery_fom_coro(struct m0_fom *fom)
 		       m0_be_op_tick_ret(&F(op), fom, RFS_WAITING));
 	m0_be_op_fini(&F(op));
 
-	if (!F(got)) {
-		m0_semaphore_up(&rf->rf_eoq_reached);
-		m0_fom_phase_set(fom, RFS_DONE);
-		return;
+	if (F(got)) {
+		M0_ASSERT(ha_event_invariant(F(state)));
+		*out = F(state);
+	} else
+		*eoq = true;
+}
+
+static void restore(struct m0_fom *fom,
+		    enum m0_ha_obj_state *out, bool *eoq)
+{
+	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
+	struct m0_dtm0_redo  redo = {};
+	int                  rc;
+
+	M0_CO_REENTER(CO(fom));
+
+	do {
+		M0_SET0(&redo);
+
+		rc = recovery_machine_log_next_get(rf->rf_m, &rf->rf_tgt_svc,
+						   &redo, NULL);
+		M0_ASSERT(M0_IN(rc, (0, -ENOENT)));
+
+		recovery_machine_redo_post(rf->rf_m,
+					   &rf->rf_tgt_proc,
+					   &rf->rf_tgt_svc,
+					   &redo,
+					   NULL);
+
+	} while (rc == 0);
+
+	M0_CO_FUN(CO(fom), heq_await(fom, out, eoq));
+}
+
+static void evict(struct m0_fom *fom,
+		  enum m0_ha_obj_state *out, bool *eoq)
+{
+	/* TODO: Replay the dtx'es sent from the failed client */
+}
+
+static void remote_recovery_fom_coro(struct m0_fom *fom)
+{
+	struct recovery_fom *rf = M0_AMB(rf, fom, rf_base);
+
+	M0_CO_REENTER(CO(fom),
+		      struct m0_be_op op;
+		      bool            eoq;
+		      enum m0_ha_obj_state state;);
+
+	F(eoq) = false;
+	M0_CO_FUN(CO(fom), heq_await(fom, &F(state), &F(eoq)));
+
+	while (!F(eoq)) {
+		M0_LOG(M0_DEBUG, "fom=%p enters %d state.",
+		       fom, F(state));
+
+		switch (F(state)) {
+		case M0_NC_DTM_RECOVERING:
+			M0_CO_FUN(CO(fom), restore(fom, &F(state), &F(eoq)));
+			break;
+		case M0_NC_FAILED:
+			if (rf->rf_is_volatile) {
+				M0_CO_FUN(CO(fom), evict(fom, &F(state),
+							 &F(eoq)));
+			} else
+				M0_IMPOSSIBLE("Permanent storage failures are "
+					      "not handled yet");
+
+		default:
+			M0_CO_FUN(CO(fom), heq_await(fom, &F(state), &F(eoq)));
+			break;
+		}
 	}
 
-	M0_ASSERT(F(state) < M0_NC_NR);
-	state = F(state);
-	M0_LOG(M0_DEBUG, "State: %d", (int) state);
+	m0_semaphore_up(&rf->rf_eoq_reached);
+	m0_fom_phase_set(fom, RFS_DONE);
 }
 
 static void local_recovery_fom_coro(struct m0_fom *fom)
@@ -1158,29 +1279,27 @@ static void local_recovery_fom_coro(struct m0_fom *fom)
 
 	M0_CO_REENTER(CO(fom),
 		      struct m0_be_op op;
-		      bool            got;
-		      uint64_t        state;);
+		      bool            eoq;
+		      enum m0_ha_obj_state state;);
 
-	/* TODO: wait for REDOs, post RECOVERED event and fade away. */
+	F(eoq) = false;
+	M0_CO_FUN(CO(fom), heq_await(fom, &F(state), &F(eoq)));
 
-	F(got) = false;
-	F(state) = 0;
+	while (!F(eoq)) {
+		M0_LOG(M0_DEBUG, "fom=%p enters %d state.", fom, F(state));
 
-	M0_SET0(&F(op));
-	m0_be_op_init(&F(op));
-	m0_be_queue_lock(&rf->rf_heq);
-	M0_BE_QUEUE_GET(&rf->rf_heq, &F(op), &F(state), &F(got));
-	m0_be_queue_unlock(&rf->rf_heq);
-	M0_CO_YIELD_RC(CO(fom),
-		       m0_be_op_tick_ret(&F(op), fom, RFS_WAITING));
-	m0_be_op_fini(&F(op));
+		if (F(state) == M0_NC_DTM_RECOVERING) {
+			/* TODO: await REDOs */
+			recovery_machine_recovered(rf->rf_m,
+						   &rf->rf_tgt_proc,
+						   &rf->rf_tgt_svc);
+		}
 
-	if (!F(got)) {
-		m0_semaphore_up(&rf->rf_eoq_reached);
-		m0_fom_phase_set(fom, RFS_DONE);
-		return;
-	} else
-		M0_IMPOSSIBLE("Local events are not handled yet.");
+		M0_CO_FUN(CO(fom), heq_await(fom, &F(state), &F(eoq)));
+	}
+
+	m0_semaphore_up(&rf->rf_eoq_reached);
+	m0_fom_phase_set(fom, RFS_DONE);
 }
 
 static void recovery_fom_coro(struct m0_fom *fom)
@@ -1207,13 +1326,9 @@ m0_ut_remach_heq_post(struct m0_dtm0_recovery_machine *m,
 		      const struct m0_fid             *tgt_svc,
 		      enum m0_ha_obj_state             state)
 {
-	struct recovery_fom *rf;
-	recovery_machine_lock(m);
-	rf = m0_tl_find(rfom, rf, &m->rm_rfoms,
-			m0_fid_eq(tgt_svc, &rf->rf_tgt_svc));
+	struct recovery_fom *rf = recovery_fom_by_svc_find_lock(m, tgt_svc);
 	M0_ASSERT_INFO(rf != NULL,
 		       "Trying to post HA event to a wrong service?");
-	recovery_machine_unlock(m);
 	heq_post(rf, state);
 }
 
@@ -1229,6 +1344,15 @@ m0_ut_remach_populate(struct m0_dtm0_recovery_machine *m,
 		M0_ASSERT(recovery_fom_add(m, procs + i, svcs + i) == 0);
 }
 
+M0_INTERNAL void
+m0_ut_remach_eol_reached(struct m0_dtm0_recovery_machine *m,
+			 const struct m0_fid             *tgt_svc)
+{
+	struct recovery_fom *rf = recovery_fom_by_svc_find_lock(m, tgt_svc);
+	M0_ASSERT_INFO(rf != NULL,
+		       "Trying to post EOL to a wrong service?");
+	/* TODO */
+}
 
 /*
  * This the draft of the DLD. It is left here for refence while the DLD
