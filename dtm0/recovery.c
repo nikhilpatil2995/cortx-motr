@@ -734,6 +734,54 @@ Max: [* defect *] No mention of tests being done. Please clearly state when and
      to find this information.
 <<<---
  */
+
+/* XXX
+Implementation plan
+-------------------
+
+Areas/responsibilities:
+- fom-groundwork (Ivan).
+- be-op-set-or (Max).
+- log-watcher (Ivan).
+- test-stubs (Ivan).
+- drlink-completion (vacancy).
+  A be op is needed to be DONE when drlink gets reply.
+- REDO2CAS-replay (Sergey).
+- EOL-notice (Ivan).
+- RECOVER-ED-ING-groundwork (Anatoliy).
+- all2all-integration-v3 (vacancy).
+  It will be needed only after P9 is ready for landing.
+- log-iter (vacancy).
+  Extend DTM0 log API to support iteration.
+- dtx-integration-v3 (Ivan).
+- recovery-stop-ha-polling-v2 (vacancy).
+  V2 should support a stop condition where it watcher for
+  HA states of the other participants.
+
+Atomic patches for upstream:
+- P1 DTM0 log iterator.
+- P2 BE op set or.
+- P3 New HA states/events -- RECOVERED/RECOVERING.
+- P4 DTM0 log watcher.
+- P5 DTM0 log iterator.
+- P6 A dummy REDO FOM.
+- P7 REDO-fom-to-CAS-fom re-play.
+- P8 Recovery machine V1.
+- P9 Recovery machine V2.
+- P10 Recovery machine V3.
+
+Dependencies between patches:
+- P7 depends on P6.
+- P8 depends on P3.
+- P9 depends on P8, P1, P2, P5, P7
+- P10 depends on P9 and TBD.
+
+Deviverables:
+- Recovery machine V1: unit-tested recovery machine with a small set of cases.
+- Recovery machine V2: integration-tested machine (m0crate, Hare).
+- Recovery machine V2: extended use-cases (failures during recovery and so on).
+*/
+
 
 
 #define M0_TRACE_SUBSYSTEM M0_TRACE_SUBSYS_DTM0
