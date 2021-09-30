@@ -757,6 +757,7 @@ Areas/responsibilities:
 - recovery-stop-ha-polling-v2 (vacancy).
   V2 should support a stop condition where it watcher for
   HA states of the other participants.
+- versioned-cas (Ivan).
 
 Atomic patches for upstream:
 - P1 DTM0 log iterator.
@@ -769,17 +770,18 @@ Atomic patches for upstream:
 - P8 Recovery machine V1.
 - P9 Recovery machine V2.
 - P10 Recovery machine V3.
+- P11 Versioned CAS.
 
 Dependencies between patches:
 - P7 depends on P6.
 - P8 depends on P3.
 - P9 depends on P8, P1, P2, P5, P7
-- P10 depends on P9 and TBD.
+- P10 depends on P9 and P11.
 
 Deviverables:
 - Recovery machine V1: unit-tested recovery machine with a small set of cases.
 - Recovery machine V2: integration-tested machine (m0crate, Hare).
-- Recovery machine V2: extended use-cases (failures during recovery and so on).
+- Recovery machine V3: extended use-cases (failures during recovery and so on).
 */
 
 
