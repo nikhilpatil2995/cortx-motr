@@ -27,6 +27,7 @@
 
 #include "lib/tlist.h" /* m0_tl */
 #include "ha/note.h"   /* m0_ha_obj_state */
+#include "conf/ha.h"   /* m0_conf_ha_process_event */
 #include "dtm0/fop.h"  /* dtm0_req_fop */
 
 /* TODO: figure good literals and it move to the satchel */
@@ -36,6 +37,8 @@
 /* imports */
 struct m0_dtm0_service;
 struct m0_conf_process;
+struct dtm0_req_fop;
+struct m0_dtm0_log_iter;
 
 /* exports */
 struct m0_dtm0_recovery_machine_ops;
@@ -46,25 +49,39 @@ struct m0_dtm0_recovery_machine {
 	const struct m0_dtm0_recovery_machine_ops *rm_ops;
 };
 
-struct m0_dtm0_redo {
-	struct dtm0_req_fop r_msg;
-};
-
 struct m0_dtm0_recovery_machine_ops {
+
+	/**
+	 * Post a REDO message to the target DTM0 service.
+	 */
 	void (*redo_post)(struct m0_dtm0_recovery_machine *m,
-			  const struct m0_fid *tgt_proc,
-			  const struct m0_fid *tgt_svc,
-			  struct m0_dtm0_redo *redo,
-			  struct m0_be_op *op);
+			  const struct m0_fid             *tgt_proc,
+			  const struct m0_fid             *tgt_svc,
+			  struct dtm0_req_fop             *redo,
+			  struct m0_be_op                 *op);
 
-	int (*log_next_get)(struct m0_dtm0_recovery_machine *m,
-			    const struct m0_fid *tgt_svc,
-			    struct m0_dtm0_redo *redo,
-			    struct m0_be_op *op);
+	/**
+	 * Get next log record (or -ENOENT) from the local DTM0 log.
+	 * @param[in] tgt_svc DTM0 service this REDO shall be sent to.
+	 * @param[in,opt] origin_svc DTM0 service to be selected. When
+	 *                           this parameter is set to non-NULL,
+	 *                           the iter is supposed to select only
+	 *                           the log records that were originated
+	 *                           on this particular service.
+	 */
+	int (*log_next_get)(struct m0_dtm0_recovery_machine   *m,
+			    struct m0_dtm0_log_iter           *iter,
+			    const struct m0_fid               *tgt_svc,
+			    const struct m0_fid               *origin_svc,
+			    struct dtm0_req_fop               *redo);
 
-	void (*recovered)(struct m0_dtm0_recovery_machine *m,
-			  const struct m0_fid *tgt_proc,
-			  const struct m0_fid *tgt_svc);
+	/**
+	 * Post a conf ha process event.
+	 */
+	void (*ha_event_post)(struct m0_dtm0_recovery_machine *m,
+			      const struct m0_fid             *tgt_proc,
+			      const struct m0_fid             *tgt_svc,
+			      enum m0_conf_ha_process_event    event);
 };
 
 M0_INTERNAL int
@@ -93,8 +110,10 @@ m0_ut_remach_populate(struct m0_dtm0_recovery_machine *m,
 		      uint64_t                         objs_nr);
 
 M0_INTERNAL void
-m0_ut_remach_eol_reached(struct m0_dtm0_recovery_machine *m,
-			 const struct m0_fid             *tgt_svc);
+m0_ut_remach_redo_post(struct m0_dtm0_recovery_machine *m,
+		       const struct m0_fid             *tgt_svc,
+		       struct dtm0_req_fop             *redo);
+
 #endif /* __MOTR_DTM0_RECOVERY_H__ */
 
 /*

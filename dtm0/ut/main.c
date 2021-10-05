@@ -325,6 +325,8 @@ struct ut_remach {
 
 	struct m0_conf_process           cli_procs[UT_SIDE_NR];
 	struct m0_mutex                  cli_proc_guards[UT_SIDE_NR];
+
+	bool                             srv_recovered;
 };
 
 struct ha_thought {
@@ -336,34 +338,64 @@ struct ha_thought {
 static void um_redo_post(struct m0_dtm0_recovery_machine *m,
 			 const struct m0_fid *tgt_proc,
 			 const struct m0_fid *tgt_svc,
-			 struct m0_dtm0_redo *redo,
+			 struct dtm0_req_fop *redo,
 			 struct m0_be_op *op)
 {
-	bool is_eol = !!(redo->r_msg.dtr_flags & M0_BITS(M0_DMF_EOL));
-	if (is_eol)
-		m0_ut_remach_eol_reached(m, tgt_svc);
+	struct ut_remach   *um = NULL;
+	struct m0_dtm0_recovery_machine *counterpart = NULL;
+
+	const struct m0_fid svcs[UT_SIDE_NR] = {
+		[UT_SIDE_SRV] = srv_dtm0_fid,
+		[UT_SIDE_CLI] = cli_srv_fid,
+	};
+
+	/* Select the counterpart using the service fid. */
+	if (m0_fid_eq(&svcs[UT_SIDE_SRV], tgt_svc)) {
+		um = M0_AMB(um, m, cli_mach);
+		counterpart = &um->srv_mach;
+	} else if (m0_fid_eq(&svcs[UT_SIDE_CLI], tgt_svc)) {
+		um = M0_AMB(um, m, srv_mach);
+		counterpart = &um->cli_mach;
+	}
+
+	M0_UT_ASSERT(um != NULL);
+	M0_UT_ASSERT(counterpart != NULL);
+
+	m0_ut_remach_redo_post(counterpart, tgt_svc, redo);
 }
 
 static int um_log_next_get(struct m0_dtm0_recovery_machine *m,
-		    const struct m0_fid *tgt_svc,
-		    struct m0_dtm0_redo *redo,
-		    struct m0_be_op *op)
+			   struct m0_dtm0_log_iter *iter,
+			   const struct m0_fid *tgt_svc,
+			    const struct m0_fid *origin_svc,
+			   struct dtm0_req_fop *redo)
 {
-	redo->r_msg.dtr_flags |= M0_BITS(M0_DMF_EOL);
+	M0_SET0(redo);
+	redo->dtr_flags |= M0_BITS(M0_DMF_EOL);
 	return -ENOENT;
 }
 
-static void um_recovered(struct m0_dtm0_recovery_machine *m,
-		  const struct m0_fid *tgt_proc,
-		  const struct m0_fid *tgt_svc)
+void um_ha_event_post(struct m0_dtm0_recovery_machine *m,
+		      const struct m0_fid             *tgt_proc,
+		      const struct m0_fid             *tgt_svc,
+		      enum m0_conf_ha_process_event    event)
 {
+	struct ut_remach *um = M0_AMB(um, m, srv_mach);
 
+	const struct m0_fid           svcs[UT_SIDE_NR] = {
+		[UT_SIDE_SRV] = srv_dtm0_fid,
+		[UT_SIDE_CLI] = cli_srv_fid,
+	};
+
+	M0_UT_ASSERT(m0_fid_eq(tgt_svc, &svcs[UT_SIDE_SRV]));
+	M0_UT_ASSERT(event == M0_CONF_HA_PROCESS_DTM_RECOVERED);
+	um->srv_recovered = true;
 }
 
 const struct m0_dtm0_recovery_machine_ops um_ops = {
-	.redo_post    = um_redo_post,
-	.log_next_get = um_log_next_get,
-	.recovered    = um_recovered,
+	.redo_post     = um_redo_post,
+	.log_next_get  = um_log_next_get,
+	.ha_event_post = um_ha_event_post,
 };
 
 static void ut_remach_ha_thinks(struct ut_remach        *um,
@@ -548,6 +580,7 @@ static void remach_ha_thinks(void)
 		  ut_remach_ha_thinks(&um, ha_thoughts + i);
 
 	ut_remach_stop(&um);
+	M0_UT_ASSERT(um.srv_recovered);
 	ut_remach_fini(&um);
 }
 
