@@ -86,3 +86,13 @@ m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *m)
 {
 	(void) m;
 }
+
+M0_INTERNAL void
+m0_dtm0_recovery_machine_redo_post(struct m0_dtm0_recovery_machine *m,
+				   struct dtm0_req_fop             *redo,
+				   struct m0_be_op                 *op)
+{
+	(void) m;
+	(void) redo;
+	(void) op;
+}

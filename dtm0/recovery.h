@@ -38,15 +38,27 @@
 struct m0_dtm0_service;
 struct m0_conf_process;
 struct dtm0_req_fop;
-struct m0_dtm0_log_iter;
+struct m0_be_dtm0_log_iter;
+struct m0_dtm0_log_rec;
 
 /* exports */
 struct m0_dtm0_recovery_machine_ops;
+struct recovery_fom;
+
+enum m0_dtm0_recovery_machine_states {
+	M0_DRMS_INIT,
+	M0_DRMS_STOPPED,
+	M0_DRMS_NR,
+};
 
 struct m0_dtm0_recovery_machine {
 	struct m0_dtm0_service                    *rm_svc;
 	struct m0_tl                               rm_rfoms;
 	const struct m0_dtm0_recovery_machine_ops *rm_ops;
+	struct recovery_fom                       *rm_local_rfom;
+
+	struct m0_sm_group                         rm_sm_group;
+	struct m0_sm                               rm_sm;
 };
 
 struct m0_dtm0_recovery_machine_ops {
@@ -60,6 +72,9 @@ struct m0_dtm0_recovery_machine_ops {
 			  struct dtm0_req_fop             *redo,
 			  struct m0_be_op                 *op);
 
+	int (*log_iter_init)(struct m0_dtm0_recovery_machine *m,
+			     struct m0_be_dtm0_log_iter      *iter);
+
 	/**
 	 * Get next log record (or -ENOENT) from the local DTM0 log.
 	 * @param[in] tgt_svc DTM0 service this REDO shall be sent to.
@@ -69,11 +84,13 @@ struct m0_dtm0_recovery_machine_ops {
 	 *                           the log records that were originated
 	 *                           on this particular service.
 	 */
-	int (*log_next_get)(struct m0_dtm0_recovery_machine   *m,
-			    struct m0_dtm0_log_iter           *iter,
-			    const struct m0_fid               *tgt_svc,
-			    const struct m0_fid               *origin_svc,
-			    struct dtm0_req_fop               *redo);
+	int (*log_iter_next)(struct m0_dtm0_recovery_machine   *m,
+			     struct m0_be_dtm0_log_iter        *iter,
+			     const struct m0_fid               *tgt_svc,
+			     const struct m0_fid               *origin_svc,
+			     struct m0_dtm0_log_rec            *record);
+
+	int (*log_iter_fini)(struct m0_be_dtm0_log_iter *iter);
 
 	/**
 	 * Post a conf ha process event.
@@ -98,6 +115,11 @@ m0_dtm0_recovery_machine_stop(struct m0_dtm0_recovery_machine *m);
 M0_INTERNAL void
 m0_dtm0_recovery_machine_fini(struct m0_dtm0_recovery_machine *m);
 
+M0_INTERNAL void
+m0_dtm0_recovery_machine_redo_post(struct m0_dtm0_recovery_machine *m,
+				   struct dtm0_req_fop             *redo,
+				   struct m0_be_op                 *op);
+
 /* UT-related API */
 M0_INTERNAL void
 m0_ut_remach_heq_post(struct m0_dtm0_recovery_machine *m,
@@ -107,12 +129,8 @@ M0_INTERNAL void
 m0_ut_remach_populate(struct m0_dtm0_recovery_machine *m,
 		      struct m0_conf_process          *procs,
 		      const struct m0_fid             *svcs,
+		      bool                            *is_volatile,
 		      uint64_t                         objs_nr);
-
-M0_INTERNAL void
-m0_ut_remach_redo_post(struct m0_dtm0_recovery_machine *m,
-		       const struct m0_fid             *tgt_svc,
-		       struct dtm0_req_fop             *redo);
 
 #endif /* __MOTR_DTM0_RECOVERY_H__ */
 
