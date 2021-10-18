@@ -2438,11 +2438,13 @@ static bool rconfc_quorum_test(struct m0_rconfc *rconfc,
 	int              idx;
 	bool             quorum_reached = false;
 
-	M0_ENTRY("rconfc = %p, confc = %p", rconfc, confc);
+	M0_ENTRY("rconfc = %p, confc = %p va_count = %d ", 
+		                     rconfc, confc, va->va_count);
 	M0_PRE(va != NULL);
 	ver = _confc_ver_read(confc);
 	M0_ASSERT(ver != M0_CONF_VER_UNKNOWN);
 	for (idx = 0; idx < va->va_count; idx++) {
+		M0_LOG (M0_DEBUG, "idx = %d ver = %PRIu64", idx, va->va_items[idx].vi_ver);
 		if (va->va_items[idx].vi_ver == ver) {
 			vi = va->va_items + idx;
 			break;
@@ -2458,9 +2460,12 @@ static bool rconfc_quorum_test(struct m0_rconfc *rconfc,
 		++va->va_count;
 	}
 	++vi->vi_count;
+	M0_LOG(M0_DEBUG, "va_count = %d vi_count=%PRIu32", va->va_count, vi->vi_count);
 
 	/* Walk along the herd and see if quorum of any version is reached. */
 	for (idx = 0; idx < va->va_count; idx++) {
+		M0_LOG(M0_DEBUG, "idx = %d vi_count = %"PRIu32" quorum = %"PRIu32, 
+			                                        idx, a->va_items[idx].vi_count, rconfc->rc_quorum);
 		if (va->va_items[idx].vi_count >= rconfc->rc_quorum) {
 			/* remember the winner */
 			rconfc->rc_ver = va->va_items[idx].vi_ver;
